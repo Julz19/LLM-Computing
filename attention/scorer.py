@@ -1,5 +1,18 @@
 # oracle/scorer.py
-import asyncio, os, re
+"""
+Provider-agnostic oracle attention scorer.
+
+Supported providers
+-------------------
+* OpenAI  (default)  → LLM_PROVIDER=openai
+* Cerebras           → LLM_PROVIDER=cerebras  +  CEREBRAS_API_KEY
+* Custom             → LLM_PROVIDER=custom    +  CUSTOM_BASE_URL  +  CUSTOM_API_KEY
+
+All non-OpenAI options must expose an OpenAI-compatible REST interface
+(e.g. Cerebras, Groq, Together, Ollama, etc.).
+"""
+
+import asyncio, os
 from collections import deque
 from functools import lru_cache
 from typing import List
@@ -10,18 +23,60 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-load_dotenv()                          # loads OPENAI_API_KEY
-client = AsyncOpenAI()
-HISTORY_SIZE = 10                      # short rolling context for the prompt
+# ────────────────────────── 0. Provider bootstrap ──────────────────────────
+load_dotenv()
 
-# -------- structured output schema -----------------------------------------
+PROVIDER = os.getenv("LLM_PROVIDER", "cerebras").lower()
+
+if PROVIDER == "openai":
+    _client = AsyncOpenAI()                                       # uses OPENAI_API_KEY
+    async def _parse(model, messages, schema, temperature=0.3):
+        resp = await _client.responses.parse(                     # <-- OpenAI “responses” API
+            model=model,
+            input=messages,
+            temperature=temperature,
+            text_format=schema,
+        )
+        return resp.output_parsed
+
+elif PROVIDER == "cerebras":
+    _client = AsyncOpenAI(
+        base_url=os.getenv("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1"),
+        api_key=os.getenv("CEREBRAS_API_KEY"),
+    )
+    async def _parse(model, messages, schema, temperature=0.3):
+        resp = await _client.beta.chat.completions.parse(         # <-- beta chat API
+            model=model,
+            messages=messages,
+            response_format=schema,
+            temperature=temperature,
+        )
+        return resp.choices[0].message.parsed
+
+else:  # generic OpenAI-compatible endpoint
+    _client = AsyncOpenAI(
+        base_url=os.getenv("CUSTOM_BASE_URL"),
+        api_key=os.getenv("CUSTOM_API_KEY"),
+    )
+    async def _parse(model, messages, schema, temperature=0.3):
+        resp = await _client.beta.chat.completions.parse(
+            model=model,
+            messages=messages,
+            response_format=schema,
+            temperature=temperature,
+        )
+        return resp.choices[0].message.parsed
+
+# ────────────────────────── 1. Scoring logic ───────────────────────────────
+HISTORY_SIZE   = 10
+DEFAULT_MODEL  = os.getenv("LLM_MODEL", "qwen-3-32b")           # override when needed
+
 class AttentionScore(BaseModel):
     consice_reasoning: str
     score: float
 
-# -------- single pair score -------------------------------------------------
 async def _oracle_score(q: str, k: str, history: deque):
-    history_str = "\n".join([f"{a}->{b}={s:.2f}" for a, b, s in history]) or "[None yet]"
+    history_str = "\n".join(f"{a}->{b}={s:.2f}" for a, b, s in history) or "[None yet]"
     prompt = f"""
 You are computing semantic attention scores between tokens in a sentence.
 
@@ -34,38 +89,27 @@ should semantically attend to:
 - Key Token: "{k}"
 
 Only return a float between 0.0 and 1.0."""
-    # responses.parse returns the Pydantic object directly
-    resp = await client.responses.parse(
-        model="gpt-4.1-nano",
-        input=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-        text_format=AttentionScore,
+    parsed: AttentionScore = await _parse(
+        model=DEFAULT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        schema=AttentionScore,
     )
     try:
-        score = float(resp.output_parsed.score)
-    except ValueError:
+        score = float(parsed.score)
+    except (TypeError, ValueError):
         score = 0.0
     history.append((q, k, score))
     return score
 
-# -------- full matrix for a token list -------------------------------------
 async def _compute_attention_matrix(tokens: List[str]) -> torch.Tensor:
-    n = len(tokens)
-    history = deque(maxlen=HISTORY_SIZE)
-
-    tasks = [
-        _oracle_score(tokens[i], tokens[j], history.copy())
-        for i in range(n) for j in range(n)
-    ]
+    n, history = len(tokens), deque(maxlen=HISTORY_SIZE)
+    tasks = [_oracle_score(tokens[i], tokens[j], history.copy())
+             for i in range(n) for j in range(n)]
     results = await asyncio.gather(*tasks)
     mat = torch.tensor(results, dtype=torch.float32).view(n, n)
-    return F.softmax(mat, dim=-1)      # (n, n)
+    return F.softmax(mat, dim=-1)
 
-# -------- public helper with in-memory cache -------------------------------
-@lru_cache(maxsize=2_048)             # key = tuple(tokens); keeps RAM small
+@lru_cache(maxsize=2_048)
 def get_attention_matrix(tokens: tuple) -> torch.Tensor:
-    """
-    Synchronous wrapper so the rest of the code can stay non-async.
-    Results are memoised for the lifetime of the process.
-    """
+    """Synchronously obtain the (n×n) attention matrix for *tokens*."""
     return asyncio.run(_compute_attention_matrix(list(tokens)))
