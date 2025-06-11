@@ -31,8 +31,27 @@ recommended. Install the dependencies with:
 pip install -r requirements.txt
 ```
 
-`attention/scorer.py` loads your OpenAI API key from the environment, so set
-`OPENAI_API_KEY` before running any training or sampling scripts.
+`attention/scorer.py` reads provider settings from the environment. Set
+`LLM_PROVIDER` and the appropriate API key(s) such as `OPENAI_API_KEY` or
+`CEREBRAS_API_KEY` before running any training or sampling scripts.
+
+### Provider configuration
+
+The attention scorer supports multiple back-end providers. Set
+`LLM_PROVIDER` to select one of the following:
+
+- `openai` – authenticates using `OPENAI_API_KEY`.
+- `cerebras` – uses `CEREBRAS_API_KEY` and optional `CEREBRAS_BASE_URL`.
+- `custom` – any OpenAI-compatible endpoint via `CUSTOM_BASE_URL` and
+  `CUSTOM_API_KEY`.
+
+The bootstrap logic in `scorer.py` illustrates how the provider is chosen:
+```python
+load_dotenv()
+PROVIDER = os.getenv("LLM_PROVIDER", "cerebras").lower()
+...
+```
+【F:attention/scorer.py†L29-L63】
 
 ## Training
 
@@ -60,15 +79,22 @@ Enter a prompt and the model will autoregressively generate additional tokens.
 The script reuses the vocabulary and device settings from `train.py` and uses
 `get_attention_matrix()` at inference time.
 
+## Attention caching
+
+From `v0.2` onwards the attention scorer stores LLM-evaluated token pair scores
+in a global cache. Repeated pairs across training or sampling will therefore
+reuse the cached value instead of issuing a new API request. This reduces both
+latency and API cost for long sequences.
+
 ## Notes for development
 
-- `scorer.py` shows where the API key is loaded and the OpenAI client is
-  initialised:
+- `scorer.py` demonstrates provider bootstrapping via environment variables:
   ```python
-  load_dotenv()                          # loads OPENAI_API_KEY
-  client = AsyncOpenAI()
+  load_dotenv()
+  PROVIDER = os.getenv("LLM_PROVIDER", "cerebras").lower()
+  ...
   ```
-  【F:attention/scorer.py†L10-L15】
+  【F:attention/scorer.py†L29-L63】
 - `train.py` expects the corpus at `data/corpus.txt` and tokenises each line
   using a simple regex:
   ```python
