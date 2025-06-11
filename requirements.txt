@@ -1,0 +1,4 @@
+openai>=1.14 # new responses API
+pydantic>=2
+torch>=2.2
+python-dotenv
