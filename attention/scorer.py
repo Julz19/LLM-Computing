@@ -15,13 +15,16 @@ All non-OpenAI options must expose an OpenAI-compatible REST interface
 import asyncio, os
 from collections import deque
 from functools import lru_cache
-from typing import List
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn.functional as F
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pydantic import BaseModel
+
+# Cache of token-pair attention scores
+SCORE_CACHE: Dict[Tuple[str, str], float] = {}
 
 # ────────────────────────── 0. Provider bootstrap ──────────────────────────
 load_dotenv()
@@ -76,6 +79,12 @@ class AttentionScore(BaseModel):
     score: float
 
 async def _oracle_score(q: str, k: str, history: deque):
+    key = (q, k)
+    if key in SCORE_CACHE:
+        score = SCORE_CACHE[key]
+        history.append((q, k, score))
+        return score
+
     history_str = "\n".join(f"{a}->{b}={s:.2f}" for a, b, s in history) or "[None yet]"
     prompt = f"""
 You are computing semantic attention scores between tokens in a sentence.
@@ -98,6 +107,8 @@ Only return a float between 0.0 and 1.0."""
         score = float(parsed.score)
     except (TypeError, ValueError):
         score = 0.0
+
+    SCORE_CACHE[key] = score
     history.append((q, k, score))
     return score
 
