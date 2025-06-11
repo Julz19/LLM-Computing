@@ -60,6 +60,13 @@ Enter a prompt and the model will autoregressively generate additional tokens.
 The script reuses the vocabulary and device settings from `train.py` and uses
 `get_attention_matrix()` at inference time.
 
+## Attention caching
+
+From `v0.2` onwards the attention scorer stores LLM-evaluated token pair scores
+in a global cache. Repeated pairs across training or sampling will therefore
+reuse the cached value instead of issuing a new API request. This reduces both
+latency and API cost for long sequences.
+
 ## Notes for development
 
 - `scorer.py` shows where the API key is loaded and the OpenAI client is
