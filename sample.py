@@ -1,7 +1,7 @@
 # sample.py
 import torch, re, readline       # noqa: F401 (readline gives nicer CLI)
 from attention.scorer import get_attention_matrix
-from llm_attn.model.attn_gpt import AttnGPT
+from model.attn_gpt import AttnGPT
 
 from train import stoi, itos, device     # reuse what we built during training
 from pathlib import Path
